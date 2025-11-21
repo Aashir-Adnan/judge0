@@ -12,7 +12,6 @@ services:
       - ./judge0.conf:/judge0.conf:ro
       - /sys/fs/cgroup:/sys/fs/cgroup:ro
       - /box:/box
-      - /tmp:/tmp
     ports:
       - "2358:2358"
     privileged: true
@@ -30,7 +29,6 @@ services:
       - ./judge0.conf:/judge0.conf:ro
       - /sys/fs/cgroup:/sys/fs/cgroup:ro
       - /box:/box
-      - /tmp:/tmp
     privileged: true
     tmpfs:
       - /tmp
