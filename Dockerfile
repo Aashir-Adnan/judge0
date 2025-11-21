@@ -12,11 +12,13 @@ LABEL maintainer=$JUDGE0_MAINTAINER
 ENV PATH "/usr/local/ruby-2.7.0/bin:/opt/.gem/bin:$PATH"
 ENV GEM_HOME "/opt/.gem/"
 
+# Install required packages including isolate
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       cron \
       libpq-dev \
-      sudo && \
+      sudo \
+      isolate && \
     rm -rf /var/lib/apt/lists/* && \
     echo "gem: --no-document" > /root/.gemrc && \
     gem install bundler:2.1.4 && \
@@ -37,13 +39,12 @@ COPY . .
 ENTRYPOINT ["/api/docker-entrypoint.sh"]
 CMD ["/api/scripts/server"]
 
+# Create judge0 user and give permissions
 RUN useradd -u 1000 -m -r judge0 && \
-    echo "judge0 ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers && \
-    chown judge0: /api/tmp/
+    echo "judge0 ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers
 
-
-# Create directories before switching user
-RUN mkdir -p /box /tmp && chown -R judge0:judge0 /box /tmp
+# Create required directories for isolate and give proper ownership
+RUN mkdir -p /box /tmp /api/tmp && chown -R judge0:judge0 /box /tmp /api/tmp
 
 VOLUME /box
 VOLUME /tmp
@@ -53,8 +54,6 @@ USER judge0
 ENV JUDGE0_VERSION "1.13.1"
 LABEL version=$JUDGE0_VERSION
 
-
+# Development stage
 FROM production AS development
-
 CMD ["sleep", "infinity"]
-
