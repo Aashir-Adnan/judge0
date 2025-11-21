@@ -52,11 +52,9 @@ class IsolateJob < ApplicationJob
   private
 
   def initialize_workdir
-    @box_id = submission.id % 2_147_483_647
-    # For cgroup v2, use empty string; isolate will handle v2 automatically
-    @cgroups = "--cg-v2"
-
-    @workdir = `isolate #{@cgroups} -b #{@box_id} --init`.chomp
+    @box_id = submission.id%2147483647
+    @cgroups = (!submission.enable_per_process_and_thread_time_limit || !submission.enable_per_process_and_thread_memory_limit) ? "--cg" : ""
+    @workdir = `isolate #{cgroups} -b #{box_id} --init`.chomp
     @boxdir = workdir + "/box"
     @tmpdir = workdir + "/tmp"
     @source_file = boxdir + "/" + submission.language.source_file.to_s
@@ -66,108 +64,143 @@ class IsolateJob < ApplicationJob
     @metadata_file = workdir + "/" + METADATA_FILE_NAME
     @additional_files_archive_file = boxdir + "/" + ADDITIONAL_FILES_ARCHIVE_FILE_NAME
 
-    [stdin_file, stdout_file, stderr_file, metadata_file].each { |f| initialize_file(f) }
+    [stdin_file, stdout_file, stderr_file, metadata_file].each do |f|
+      initialize_file(f)
+    end
 
-    File.write(source_file, submission.source_code) unless submission.is_project
-    File.write(stdin_file, submission.stdin)
+    File.open(source_file, "wb") { |f| f.write(submission.source_code) } unless submission.is_project
+    File.open(stdin_file, "wb") { |f| f.write(submission.stdin) }
 
     extract_archive
   end
 
   def initialize_file(file)
-    FileUtils.touch(file)
-    FileUtils.chown(Process.uid, Process.gid, file)
+    `sudo touch #{file} && sudo chown $(whoami): #{file}`
   end
 
   def extract_archive
     return unless submission.additional_files?
 
-    File.write(additional_files_archive_file, submission.additional_files)
+    File.open(additional_files_archive_file, "wb") { |f| f.write(submission.additional_files) }
 
-    command = <<~CMD
-      isolate #{@cgroups} \
-      -s \
-      -b #{@box_id} \
-      --stderr-to-stdout \
-      -t 2 \
-      -x 1 \
-      -w 4 \
-      -k #{Config::MAX_STACK_LIMIT} \
-      -p#{Config::MAX_MAX_PROCESSES_AND_OR_THREADS} \
-      -M #{Config::MAX_MEMORY_LIMIT} \
-      -f #{Config::MAX_EXTRACT_SIZE} \
-      --run \
-      -- /usr/bin/unzip -n -qq #{ADDITIONAL_FILES_ARCHIVE_FILE_NAME}
-    CMD
+    command = "isolate #{cgroups} \
+    -s \
+    -b #{box_id} \
+    --stderr-to-stdout \
+    -t 2 \
+    -x 1 \
+    -w 4 \
+    -k #{Config::MAX_STACK_LIMIT} \
+    -p#{Config::MAX_MAX_PROCESSES_AND_OR_THREADS} \
+    #{submission.enable_per_process_and_thread_time_limit ? (cgroups.present? ? "--no-cg-timing" : "") : "--cg-timing"} \
+    #{submission.enable_per_process_and_thread_memory_limit ? "-m " : "--cg-mem="}#{Config::MAX_MEMORY_LIMIT} \
+    -f #{Config::MAX_EXTRACT_SIZE} \
+    --run \
+    -- /usr/bin/unzip -n -qq #{ADDITIONAL_FILES_ARCHIVE_FILE_NAME} \
+    "
 
     puts "[#{DateTime.now}] Extracting archive for submission #{submission.token} (#{submission.id}):"
     puts command.gsub(/\s+/, " ")
     puts
 
     `#{command}`
+
     File.delete(additional_files_archive_file)
   end
 
-
   def compile
-    return :success if !submission.is_project && !submission.language.compile_cmd
+    unless submission.is_project
+      return :success unless submission.language.compile_cmd
+    end
 
     compile_script = boxdir + "/" + "compile.sh"
 
+    acceptable_project_compile_scripts = [compile_script, boxdir + "/" + "compile"]
     if submission.is_project
-      # Look for project-specific compile scripts
-      compile_file = [compile_script, boxdir + "/compile"].find { |f| File.file?(f) }
-      return :success unless compile_file
-      compile_script = compile_file
+      compile_file_exists = false
+      acceptable_project_compile_scripts.each do |f|
+        if File.file?(f)
+          compile_script = f
+          compile_file_exists = true
+          break
+        end
+      end
+
+      unless compile_file_exists
+        return :success # If compile script does not exist then this project does not need to be compiled.
+      end
     else
+      # gsub can be skipped if compile script is used, but is kept for additional security.
       compiler_options = submission.compiler_options.to_s.strip.encode("UTF-8", invalid: :replace).gsub(/[$&;<>|`]/, "")
-      File.write(compile_script, "#{submission.language.compile_cmd % compiler_options}")
+      File.open(compile_script, "w") { |f| f.write("#{submission.language.compile_cmd % compiler_options}") }
     end
 
     compile_output_file = workdir + "/" + "compile_output.txt"
     initialize_file(compile_output_file)
 
-    command = <<~CMD
-      isolate #{@cgroups} \
-      -s \
-      -b #{@box_id} \
-      -M #{Config::MAX_MEMORY_LIMIT} \
-      -t #{Config::MAX_CPU_TIME_LIMIT} \
-      -x 0 \
-      -w #{Config::MAX_WALL_TIME_LIMIT} \
-      -k #{Config::MAX_STACK_LIMIT} \
-      -p#{Config::MAX_MAX_PROCESSES_AND_OR_THREADS} \
-      -f #{Config::MAX_MAX_FILE_SIZE} \
-      -E HOME=/tmp \
-      -E PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-      --run \
-      -- /bin/bash $(basename #{compile_script}) > #{compile_output_file}
-    CMD
+    command = "isolate #{cgroups} \
+    -s \
+    -b #{box_id} \
+    -M #{metadata_file} \
+    --stderr-to-stdout \
+    -i /dev/null \
+    -t #{Config::MAX_CPU_TIME_LIMIT} \
+    -x 0 \
+    -w #{Config::MAX_WALL_TIME_LIMIT} \
+    -k #{Config::MAX_STACK_LIMIT} \
+    -p#{Config::MAX_MAX_PROCESSES_AND_OR_THREADS} \
+    #{submission.enable_per_process_and_thread_time_limit ? (cgroups.present? ? "--no-cg-timing" : "") : "--cg-timing"} \
+    #{submission.enable_per_process_and_thread_memory_limit ? "-m " : "--cg-mem="}#{Config::MAX_MEMORY_LIMIT} \
+    -f #{Config::MAX_MAX_FILE_SIZE} \
+    -E HOME=/tmp \
+    -E PATH=\"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\" \
+    -E LANG -E LANGUAGE -E LC_ALL -E JUDGE0_HOMEPAGE -E JUDGE0_SOURCE_CODE -E JUDGE0_MAINTAINER -E JUDGE0_VERSION \
+    -d /etc:noexec \
+    --run \
+    -- /bin/bash $(basename #{compile_script}) > #{compile_output_file} \
+    "
 
     puts "[#{DateTime.now}] Compiling submission #{submission.token} (#{submission.id}):"
     puts command.gsub(/\s+/, " ")
+    puts
+
     `#{command}`
     process_status = $?
 
-    submission.compile_output = File.read(compile_output_file).presence
+    compile_output = File.read(compile_output_file)
+    compile_output = nil if compile_output.empty?
+    submission.compile_output = compile_output
+
+    metadata = get_metadata
+
     reset_metadata_file
 
     files_to_remove = [compile_output_file]
     files_to_remove << compile_script unless submission.is_project
-    files_to_remove.each { |f| `sudo rm -rf #{f}` }
-
-    unless process_status.success?
-      metadata = get_metadata
-      submission.compile_output ||= "Compilation time limit exceeded." if metadata[:status] == "TO"
-      submission.finished_at = DateTime.now
-      submission.status = Status.ce
-      submission.save
-      return :failure
+    files_to_remove.each do |f|
+      `sudo rm -rf #{f}`
     end
 
-    :success
-  end
+    return :success if process_status.success?
 
+    if metadata[:status] == "TO"
+      submission.compile_output = "Compilation time limit exceeded."
+    end
+
+    submission.finished_at = DateTime.now
+    submission.time = nil
+    submission.wall_time = nil
+    submission.memory = nil
+    submission.stdout = nil
+    submission.stderr = nil
+    submission.exit_code = nil
+    submission.exit_signal = nil
+    submission.message = nil
+    submission.status = Status.ce
+    submission.save
+
+    return :failure
+  end
 
   def run
     run_script = boxdir + "/" + "run.sh"
