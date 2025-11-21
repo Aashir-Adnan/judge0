@@ -54,7 +54,7 @@ class IsolateJob < ApplicationJob
   def initialize_workdir
     @box_id = submission.id % 2_147_483_647
     # For cgroup v2, use empty string; isolate will handle v2 automatically
-    @cgroups = ""
+    @cgroups = "--cg-v2"
 
     @workdir = `isolate #{@cgroups} -b #{@box_id} --init`.chomp
     @boxdir = workdir + "/box"
