@@ -10,9 +10,14 @@ services:
     image: judge0/judge0:latest
     volumes:
       - ./judge0.conf:/judge0.conf:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      - /box:/box
+      - /tmp:/tmp
     ports:
       - "2358:2358"
     privileged: true
+    tmpfs:
+      - /tmp
     <<: *default-logging
     restart: always
 
@@ -23,7 +28,12 @@ services:
     command: ["./scripts/workers"]
     volumes:
       - ./judge0.conf:/judge0.conf:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      - /box:/box
+      - /tmp:/tmp
     privileged: true
+    tmpfs:
+      - /tmp
     <<: *default-logging
     restart: always
 
